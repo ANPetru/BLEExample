@@ -7,7 +7,6 @@
       </q-item>
     </q-list>
     <q-btn :label="isScaning?'Scanning':'Scan'" @click.native="scanDevices" :disabled="isScaning"></q-btn>
-    {{deviceCharac}}
     <br/>
   </q-page>
 </template>
@@ -19,7 +18,6 @@ export default {
       devices:[],
       subscription: null,
       isScaning: false,
-      deviceCharac: ""
           }
   },
   methods:{
@@ -42,16 +40,9 @@ export default {
       },3000)
     },
     connectDevice(dev){
-      this.$router.go({name: "char"})
-      /*console.log("connect")
       if(dev.title!="Error"){
-        console.log("connect2")
-        psgo.call("web.connect.bluetooth.devices", dev.id).then( result =>{
-          console.log("connected")
-          console.log("result")
-          this.deviceCharac = result
-        })
-      }*/
+        this.$router.push({name:"char", params:{title: dev.title, id: dev.id}})
+      }
     }
   }
 }
