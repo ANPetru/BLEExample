@@ -4,21 +4,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
-	"github.com/gopherjs/gopherjs/js"
 	"github.com/jaracil/ei"
 	"github.com/jaracil/goco/ble"
 	"github.com/jaracil/psgo"
 	_ "github.com/jaracil/psgo/psjs"
 )
 
-var document = js.Global.Get("document")
 var devices [][]string
 var connectedDev *ble.Peripheral
 
-type Characteristic struct {
+type CharacteristicToRead struct {
 	Service  string `json:"service"`
-	CharacId string `json:"characId"`
+	CharacID string `json:"characId"`
+}
+
+type CharacteristicToWrite struct {
+	Service  string `json:"service"`
+	CharacID string `json:"characId"`
+	Message  string `json:"message"`
 }
 
 type UniversalDTO struct {
@@ -32,8 +37,10 @@ func main() {
 	subscriber.Subscribe("web.stop.bluetooth.devices")
 	subscriber.Subscribe("web.connect.bluetooth.devices")
 	subscriber.Subscribe("web.read.bluetooth.devices")
+	subscriber.Subscribe("web.write.bluetooth.devices")
 	subscriber.Subscribe("web.disconnect.bluetooth.devices")
 	subscriber.Subscribe("web.get.connected.bluetooth.devices")
+	subscriber.Subscribe("web.rssi.get.bluetooth.devices")
 
 }
 
@@ -45,9 +52,39 @@ func msgSubscriber(msg *psgo.Msg) {
 		"web.read.bluetooth.devices":          readCharacteristic,
 		"web.disconnect.bluetooth.devices":    disconnectDevice,
 		"web.get.connected.bluetooth.devices": getConnectedDevice,
+		"web.write.bluetooth.devices":         writeToCharac,
+		"web.rssi.get.bluetooth.devices":      getRSSI,
 	}
 	fmt.Println(msg.To)
 	subscribers[msg.To](msg)
+}
+
+func getRSSI(msg *psgo.Msg) {
+	rssi, err := ble.ReadRSSI(connectedDev.ID())
+	if err != nil {
+		msg.Answer("Error", nil)
+	} else {
+		msg.Answer(fmt.Sprintf("%d", rssi), nil)
+	}
+}
+
+func writeToCharac(msg *psgo.Msg) {
+	if ble.IsConnected(connectedDev.ID()) {
+		dtoToSend := UniversalDTO{msg.Dat}
+		byteData, _ := json.Marshal(dtoToSend)
+		charac := &CharacteristicToWrite{}
+		recivedDTO := UniversalDTO{Data: charac}
+		json.Unmarshal(byteData, &recivedDTO)
+		fmt.Println("Writing message: " + charac.Message + " to " + connectedDev.ID() + " - " + charac.Service + " - " + charac.CharacID)
+		err := ble.Write(connectedDev.ID(), charac.Service, charac.CharacID, []byte(charac.Message))
+		if err != nil {
+			fmt.Println(err.Error())
+		} else {
+			fmt.Println("Message s1ent successfully")
+		}
+	} else {
+		//device is disconnected
+	}
 }
 
 func getConnectedDevice(msg *psgo.Msg) {
@@ -58,20 +95,30 @@ func getConnectedDevice(msg *psgo.Msg) {
 }
 
 func disconnectDevice(msg *psgo.Msg) {
-	ble.Disconnect(connectedDev.ID())
-	connectedDev = nil
-
+	if connectedDev != nil {
+		err := ble.Disconnect(connectedDev.ID())
+		if err != nil {
+			fmt.Println(err.Error())
+		}
+		fmt.Println("Removing connected device")
+		connectedDev = nil
+	}
 }
 
 func readCharacteristic(msg *psgo.Msg) {
-	dtoToSend := UniversalDTO{msg.Dat}
-	byteData, _ := json.Marshal(dtoToSend)
+	if ble.IsConnected(connectedDev.ID()) {
+		dtoToSend := UniversalDTO{msg.Dat}
+		byteData, _ := json.Marshal(dtoToSend)
+		charac := &CharacteristicToRead{}
+		recivedDTO := UniversalDTO{Data: charac}
+		json.Unmarshal(byteData, &recivedDTO)
+		response, _ := ble.Read(connectedDev.ID(), charac.Service, charac.CharacID)
+		fmt.Println(response)
+		msg.Answer(getStringFromBA(response), nil)
+	} else {
+		msg.Answer("disconnected", nil)
+	}
 
-	charac := &Characteristic{}
-	recivedDTO := UniversalDTO{Data: charac}
-	json.Unmarshal(byteData, &recivedDTO)
-	response, _ := ble.Read(connectedDev.ID(), charac.Service, charac.CharacId)
-	msg.Answer(getStringFromBA(response), nil)
 }
 
 func getStringFromBA(arr []byte) []string {
@@ -82,10 +129,7 @@ func getStringFromBA(arr []byte) []string {
 		for i := 1; i < len(arr)-1; i++ {
 
 			if arr[i] == 44 {
-				fmt.Println(str)
 				str = strings.Replace(str, "\"", "", -1)
-				fmt.Println(str)
-
 				result = append(result, str)
 				ind++
 				i++
@@ -105,18 +149,25 @@ func getStringFromBA(arr []byte) []string {
 		result = append(result, str)
 	}
 	return result
-
 }
 
 func connectDevice(msg *psgo.Msg) {
 	if connectedDev == nil {
+		answered := false
+		time.AfterFunc(5*time.Second, func() {
+			if !answered {
+				answered = true
+				msg.Answer("Error", nil)
+			}
+		})
 		cD, err := ble.Connect(ei.N(msg.Dat).StringZ(), nil)
-		connectedDev = cD
-		if err == nil {
+		if err == nil && !answered {
+			connectedDev = cD
 			msg.Answer(connectedDev.Characteristics(), nil)
 		} else {
 			msg.Answer("Error", nil)
 		}
+		answered = true
 	} else {
 		msg.Answer(connectedDev.Characteristics(), nil)
 	}
@@ -124,8 +175,7 @@ func connectDevice(msg *psgo.Msg) {
 
 func scanDevices(msg *psgo.Msg) {
 	devices = nil
-	opt := []string{}
-	ble.StartScan(opt, onFoundDevice, false)
+	ble.StartScan([]string{}, onFoundDevice, false)
 }
 
 func stopScaning(msg *psgo.Msg) {
@@ -133,9 +183,12 @@ func stopScaning(msg *psgo.Msg) {
 	if err != nil {
 		devices = nil
 		devices = append(devices, []string{"Error", "Error"})
+		devices = append(devices, []string{"Error", "Error"})
+		devices = append(devices, []string{"Error", "Error"})
+		devices = append(devices, []string{"Error", "Error"})
+
 	}
 	msg.Answer(devices, nil)
-
 }
 
 func onFoundDevice(p *ble.Peripheral) {
